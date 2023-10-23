@@ -1,0 +1,475 @@
+library(readxl)
+library(zoo)
+
+data <- read_excel("/Users/carlthuresson/Documents/Table 1.xls")
+yy <- log(data$rgdpq) #GDP in logs
+y <- 100 * diff(yy) #GDP growth in logs
+T <- length(y) #Number of quarters
+
+#A number of globals that they have in matlab, not sure what they do
+mstarU <- 5 #Nr of lags U-shaped recession persists
+mstarL <- 5 #Nr of lags L-shaped recession persists
+growth_bdate <- 236 #Assumption of where structural break in growth exist = 2006Q1
+vol_bdate <- 149 #Assumption of structural break in volatility exist = 1984Q2
+
+prmtr_in <- c(-3.5, -3.9, 0.6, 0.9, 0.9, -1.3, -2.0, -0.4, -0.2, -1.7) #Initial parameter values for function
+
+#LIKELIHOOD FUNCTION
+
+lik_fcn <- function(prmtr_in, T, y, mstarU, mstarL, vol_bdate, growth_bdate){
+  no_st <- 8 #Nr of periods to consider
+  dmnsion <- 3^no_st #Nr of cases to consider
+  
+  #Parameters
+  p01 <- prmtr_in[1] #Prob. of going from normal to L-shaped recession
+  p02 <- prmtr_in[2] #Prob. of going from normal to U-shaped recession
+  p11 <- prmtr_in[3] #Prob. of staying in L-shaped recession
+  p22 <- prmtr_in[4] #Prob. of staying in U-shaped recession
+  mu0 <- prmtr_in[5] #Growth in normal
+  mu1 <- prmtr_in[6] #Effect on growth in L-shaped recession
+  mu2 <- prmtr_in[7] #Effect on growth in U-shaped recession
+  omega1 <- 0 #No bounceback effect for growth during L-shaped recession
+  omega2 <- -mu2/mstarU #Bounceback effect on growth for U-shaped recession
+  delta <- prmtr_in[8] #Change in trend growth
+  sigma2_pre <- prmtr_in[9]^2 #Volatility of growth before structural break
+  sigma2_post <- prmtr_in[10]^2 #Volatility of growth after structural break
+  
+  PI <- matrix(0, nrow =3, ncol =3) #Matrix of probability for going from one state to another
+  PI[1, 1] <- 1 - p01 - p02 #Staying in N
+  PI[1, 2] <- p01 #N to L
+  PI[1, 3] <- p02 #N to U
+  PI[2, 1] <- p11 #L to N
+  PI[2, 2] <- 1 - p11 #Staying in L
+  PI[2, 3] <- 0 #L to U
+  PI[3, 1] <- 1 - p22 #U to N
+  PI[3, 2] <- 0 #U to L
+  PI[3, 3] <- p22 #Staying in U
+  
+  A <- rbind(diag(3) - PI, rep(1, 3)) #Complementary probabilities for staying in same state
+  en <- c(rep(0, 3), 1) #Vector of zeros and one at the end
+  prob__t <- solve(t(A) %*% A) %*% (t(A) %*% en) #Calculates the steady-state prob.(=prob. of staying in one state)
+  
+  pr_trf0 <- as.vector(PI) #Reshapes PI to a vector
+  pr_trf1 <- c(pr_trf0, pr_trf0, pr_trf0) #Stacks the vector on top of itself
+  pr_trf2 <- c(pr_trf1, pr_trf1, pr_trf1) #Again, same thing
+  pr_trf3 <- c(pr_trf2, pr_trf2, pr_trf2)
+  pr_trf4 <- c(pr_trf3, pr_trf3, pr_trf3)
+  pr_trf5 <- c(pr_trf4, pr_trf4, pr_trf4)
+  pr_trf <- c(pr_trf5, pr_trf5, pr_trf5) #Resulting in a long ass vector of steady state probabilities
+  
+  #Stack steady state probabilities on top of each other
+  prob__t0 <- c(prob__t, prob__t, prob__t) 
+  prob__t1 <- c(prob__t0, prob__t0, prob__t0)
+  prob__t2 <- c(prob__t1, prob__t1, prob__t1)
+  prob__t3 <- c(prob__t2, prob__t2, prob__t2)
+  prob__t4 <- c(prob__t3, prob__t3, prob__t3)
+  prob__t5 <- c(prob__t4, prob__t4, prob__t4)
+  prob__t6 <- c(prob__t5, prob__t5, prob__t5)
+  
+  #Converting the vectors to a column and multiplying with probability vector to get unconditional probabilities
+  prob__t00 <- matrix(prob__t0, nrow = length(prob__t0), ncol = 1) * pr_trf0 
+  prob__t11 <- matrix(prob__t1, nrow = length(prob__t1), ncol = 1) * pr_trf1
+  prob__t22 <- matrix(prob__t2, nrow = length(prob__t2), ncol = 1) * pr_trf2
+  prob__t33 <- matrix(prob__t3, nrow = length(prob__t3), ncol = 1) * pr_trf3
+  prob__t44 <- matrix(prob__t4, nrow = length(prob__t4), ncol = 1) * pr_trf4
+  prob__t55 <- matrix(prob__t5, nrow = length(prob__t5), ncol = 1) * pr_trf5
+  prob__ <- matrix(prob__t6, nrow = length(prob__t6), ncol = 1) * pr_trf #Unconditional prob. for 3*8 cases
+
+  #Creating selection matrices for the Markov-switching
+  sU <- c(0, 0, 1)
+  
+  sU0 <- kronecker(ones_vector, kronecker(sU, matrix(1, nrow = 1, ncol = 1)))
+  sU1 <- kronecker(rep(1, 3^6), kronecker(sU,rep(1, 3^1)))
+  sU2 <- kronecker(rep(1, 3^5), kronecker(sU,rep(1, 3^2)))
+  sU3 <- kronecker(rep(1, 3^4), kronecker(sU,rep(1, 3^3)))
+  sU4 <- kronecker(rep(1, 3^3), kronecker(sU,rep(1, 3^4)))
+  sU5 <- kronecker(rep(1, 3^2), kronecker(sU,rep(1, 3^5)))
+  sU6 <- kronecker(rep(1, 3^1), kronecker(sU,rep(1, 3^6)))
+  sU7 <- kronecker(rep(1, 3^0), kronecker(sU,rep(1, 3^7)))
+  
+  sUmat <- matrix(c(sU7, sU6, sU5, sU4, sU3, sU2, sU1, sU0), ncol = 8, byrow = FALSE)
+  
+  sL <- c(0, 1, 0)
+  
+  sL0 <- kronecker(ones_vector, kronecker(sL, matrix(1, nrow = 1, ncol = 1)))
+  sL1 <- kronecker(rep(1, 3^6), kronecker(sL,rep(1, 3^1)))
+  sL2 <- kronecker(rep(1, 3^5), kronecker(sL,rep(1, 3^2)))
+  sL3 <- kronecker(rep(1, 3^4), kronecker(sL,rep(1, 3^3)))
+  sL4 <- kronecker(rep(1, 3^3), kronecker(sL,rep(1, 3^4)))
+  sL5 <- kronecker(rep(1, 3^2), kronecker(sL,rep(1, 3^5)))
+  sL6 <- kronecker(rep(1, 3^1), kronecker(sL,rep(1, 3^6)))
+  sL7 <- kronecker(rep(1, 3^0), kronecker(sL,rep(1, 3^7)))
+  
+  sLmat <- matrix(c(sL7, sL6, sL5, sL4, sL3, sL2, sL1, sL0), ncol = 8, byrow = FALSE)
+  
+  val <- 0 #Stored value that will be updated
+  d <- 0 #Same here
+  dd <- 0 #And same here
+  j_iter <- 1 #Number of iterations
+  
+  while (j_iter <= T) { #As long as number of iterations smaller than T
+    if (j_iter > growth_bdate) { 
+      d <- 1 #If number of iterations are bigger than the ass. of struc. break in growth, set d to 1
+    }
+    if (j_iter > vol_bdate) {
+      dd <- 1 #If number of iterations are bigger than the ass. of struc. break in volatility, set dd to 1
+    }
+  
+  #Create a function conditioned on all the probabilities of switching states
+  f_cast1 <- y[j_iter] - rep(mu0, dmnsion) - d * rep(delta, dmnsion) - sLmat[, 8] * mu1 - omega1 * rowSums(sLmat[, (8 - mstarL):7]) - sUmat[, 8] * mu2 - omega2 * rowSums(sUmat[, (8 - mstarU):7])
+  #Create a value to see if there is a structural break in volatility
+  var_L <- (1 - dd) * sigma2_pre * rep(1, dmnsion) + dd * sigma2_post * rep(1, dmnsion)
+  #Joint probability of transition
+  prob_dd <- pr_trf * prob__
+  #Calculation of weighted average for gdp conditioned on past information
+  pr_vl <- (1 / sqrt(2 * pi * var_L)) * exp(-0.5 * f_cast1 * f_cast1 / var_L) * prob_dd
+  pr_val <- sum(pr_vl)
+  #Calculate contribution of each time period and store it in "val"
+  lik <- log(pr_val)
+  pro_ <- pr_vl / pr_val
+  prob__t <- pro_[1:(dmnsion / 3)] + pro_[(dmnsion / 3 + 1):(2 * dmnsion / 3)] + pro_[(2 * dmnsion / 3 + 1):dmnsion]
+  prob__ <- matrix(rep(prob__t, 3), ncol = 1)
+  val <- val + lik
+  
+  j_iter <- j_iter + 1 #Increase the number of iterations done by one
+  }
+  
+  nval <- -val #Negative value of val
+  return(nval)
+  
+}
+
+
+#END LIKELIHOOD FUNCTION
+
+#TRANSFORMATION FUNCTION
+
+trans <- function(c0) {
+  c1 <- c0
+  
+  c1[1] <- exp(c0[1]) / (1 + exp(c0[1]) + exp(c0[2]))
+  c1[2] <- exp(c0[2]) / (1 + exp(c0[1]) + exp(c0[2]))
+  
+  c1[3] <- exp(c0[3]) / (1 + exp(c0[3]))
+  c1[4] <- exp(c0[4]) / (1 + exp(c0[4]))
+  
+  c1[6] <- -exp(c0[6])
+  
+  c1[9] <- sqrt(exp(c0[9]))
+  c1[10] <- sqrt(exp(c0[10]))
+  
+  return(c1)
+}
+
+#END TRANSFORMATION FUNCTION
+
+#CALCULATE JACOBIAN OF FUNCTION f GIVEN x
+
+compute_jacobian <- function (f, x) {
+  
+  epsilon <- 0.00000001
+  epsilon_inv <- 1/epsilon
+  nx <- length(x)
+  f0 <- do.call(f, as.list(x))
+  
+  jac <- matrix(0, nrow = length(f0), ncol = nx)
+  
+  for (i in 1:nx) {
+    x_ <- x
+    x_[i] <- x[i] + epsilon
+    f_ <- do.call(f, as.list(x_))
+    jac[, i] <- (f_ - f0) * epsilon_inv
+  }
+  
+  return(jac)
+}
+
+#END JACOBIAN FUNCTION
+
+#FILTERED INFERENCE FUNCTION
+
+filtered_inference <- function(prmtr_in, T, y, mstarU, mstarL, vol_bdate, growth_bdate) {
+  no_st <- 8
+  dmnsion <- 3^8
+  
+  p01 <- prmtr_in[1] 
+  p02 <- prmtr_in[2] 
+  p11 <- prmtr_in[3] 
+  p22 <- prmtr_in[4] 
+  mu0 <- prmtr_in[5] 
+  mu1 <- prmtr_in[6] 
+  mu2 <- prmtr_in[7] 
+  omega1 <- 0    
+  omega2 <- -mu2 / mstarU  
+  delta <- prmtr_in[8]
+  sigma2_pre <- prmtr_in[9] ^ 2  
+  sigma2_post <- prmtr_in[10] ^ 2 
+  
+  PI <- matrix(0, nrow =3, ncol =3) 
+  PI[1, 1] <- 1 - p01 - p02 
+  PI[1, 2] <- p01 
+  PI[1, 3] <- p02 
+  PI[2, 1] <- p11 
+  PI[2, 2] <- 1 - p11 
+  PI[2, 3] <- 0 
+  PI[3, 1] <- 1 - p22 
+  PI[3, 2] <- 0 
+  PI[3, 3] <- p22 
+  
+  A <- rbind(diag(3) - PI, rep(1, 3)) 
+  en <- c(rep(0, 3), 1) 
+  prob__t <- solve(t(A) %*% A) %*% (t(A) %*% en) 
+  
+  pr_trf0 <- as.vector(PI) 
+  pr_trf1 <- c(pr_trf0, pr_trf0, pr_trf0) 
+  pr_trf2 <- c(pr_trf1, pr_trf1, pr_trf1) 
+  pr_trf3 <- c(pr_trf2, pr_trf2, pr_trf2)
+  pr_trf4 <- c(pr_trf3, pr_trf3, pr_trf3)
+  pr_trf5 <- c(pr_trf4, pr_trf4, pr_trf4)
+  pr_trf <- c(pr_trf5, pr_trf5, pr_trf5) 
+  
+  
+  prob__t0 <- c(prob__t, prob__t, prob__t) 
+  prob__t1 <- c(prob__t0, prob__t0, prob__t0)
+  prob__t2 <- c(prob__t1, prob__t1, prob__t1)
+  prob__t3 <- c(prob__t2, prob__t2, prob__t2)
+  prob__t4 <- c(prob__t3, prob__t3, prob__t3)
+  prob__t5 <- c(prob__t4, prob__t4, prob__t4)
+  prob__t6 <- c(prob__t5, prob__t5, prob__t5)
+  
+
+  prob__t00 <- matrix(prob__t0, nrow = length(prob__t0), ncol = 1) * pr_trf0 
+  prob__t11 <- matrix(prob__t1, nrow = length(prob__t1), ncol = 1) * pr_trf1
+  prob__t22 <- matrix(prob__t2, nrow = length(prob__t2), ncol = 1) * pr_trf2
+  prob__t33 <- matrix(prob__t3, nrow = length(prob__t3), ncol = 1) * pr_trf3
+  prob__t44 <- matrix(prob__t4, nrow = length(prob__t4), ncol = 1) * pr_trf4
+  prob__t55 <- matrix(prob__t5, nrow = length(prob__t5), ncol = 1) * pr_trf5
+  prob__ <- matrix(prob__t6, nrow = length(prob__t6), ncol = 1) * pr_trf 
+  
+
+  sU <- c(0, 0, 1)
+  
+  sU0 <- kronecker(ones_vector, kronecker(sU, matrix(1, nrow = 1, ncol = 1)))
+  sU1 <- kronecker(rep(1, 3^6), kronecker(sU,rep(1, 3^1)))
+  sU2 <- kronecker(rep(1, 3^5), kronecker(sU,rep(1, 3^2)))
+  sU3 <- kronecker(rep(1, 3^4), kronecker(sU,rep(1, 3^3)))
+  sU4 <- kronecker(rep(1, 3^3), kronecker(sU,rep(1, 3^4)))
+  sU5 <- kronecker(rep(1, 3^2), kronecker(sU,rep(1, 3^5)))
+  sU6 <- kronecker(rep(1, 3^1), kronecker(sU,rep(1, 3^6)))
+  sU7 <- kronecker(rep(1, 3^0), kronecker(sU,rep(1, 3^7)))
+  
+  sUmat <- matrix(c(sU7, sU6, sU5, sU4, sU3, sU2, sU1, sU0), ncol = 8, byrow = FALSE)
+  
+  sL <- c(0, 1, 0)
+  
+  sL0 <- kronecker(ones_vector, kronecker(sL, matrix(1, nrow = 1, ncol = 1)))
+  sL1 <- kronecker(rep(1, 3^6), kronecker(sL,rep(1, 3^1)))
+  sL2 <- kronecker(rep(1, 3^5), kronecker(sL,rep(1, 3^2)))
+  sL3 <- kronecker(rep(1, 3^4), kronecker(sL,rep(1, 3^3)))
+  sL4 <- kronecker(rep(1, 3^3), kronecker(sL,rep(1, 3^4)))
+  sL5 <- kronecker(rep(1, 3^2), kronecker(sL,rep(1, 3^5)))
+  sL6 <- kronecker(rep(1, 3^1), kronecker(sL,rep(1, 3^6)))
+  sL7 <- kronecker(rep(1, 3^0), kronecker(sL,rep(1, 3^7)))
+  
+  sLmat <- matrix(c(sL7, sL6, sL5, sL4, sL3, sL2, sL1, sL0), ncol = 8, byrow = FALSE)
+  
+  #Create vectors of the bounceback effect depending on L or U-shaped recession
+  Lvec <- c(omega1, 2 * omega1, 3 * omega1, 4 * omega1, 5 * omega1, 6 * omega1, 7 * omega1)
+  Uvec <- c(omega2, 2 * omega2, 3 * omega2, 4 * omega2, 5 * omega2, 6 * omega2, 7 * omega2)
+  
+  #Trimming the vectors depending on how persistent recession is
+  Lvec <- Lvec[1:mstarL]
+  Uvec <- Uvec[1:mstarU]
+  
+  #Storage space for probabilities
+  prtt <- matrix(0, nrow = T, ncol = 3)
+  prtl <- matrix(0, nrow = T, ncol = 3)  
+  yhatvec <- numeric(T)  # For yhat
+  gapvec <- numeric(T)   # For the output gap
+  
+  d <- 0 #Stored values
+  dd <- 0 #--||--
+  
+  while (j_iter <= T) { #As long as number of iterations smaller than T
+    if (j_iter > growth_bdate) { 
+      d <- 1 #If number of iterations are bigger than the ass. of struc. break in growth, set d to 1
+    }
+    if (j_iter > vol_bdate) {
+      dd <- 1 #If number of iterations are bigger than the ass. of struc. break in volatility, set dd to 1
+    }
+  
+  
+  #Create a function conditioned on all the probabilities of switching states
+  f_cast1 <- y[j_iter] - rep(mu0, dmnsion) - d * rep(delta, dmnsion) - sLmat[, 8] * mu1 - omega1 * rowSums(sLmat[, (8 - mstarL):7]) - sUmat[, 8] * mu2 - omega2 * rowSums(sUmat[, (8 - mstarU):7])
+  #Compute yhat
+  ones_vector <- rep(1, dmnsion)  # A vector of ones
+  yhat <- ones_vector * mu0 + d * ones_vector * delta + sLmat[, 8] * mu1 + omega1 * rowSums(sLmat[, 8 - mstarL:7]) + sUmat[, 8] * mu2 + omega2 * rowSums(sUmat[, 8 - mstarU:7])
+  #Create a value to see if there is a structural break in volatility
+  var_L <- (1 - dd) * sigma2_pre * rep(1, dmnsion) + dd * sigma2_post * rep(1, dmnsion)
+  #Joint probability of transition
+  prob_dd <- pr_trf * prob__
+  
+  #Reducing probability of transition 
+  # Make a copy of prob_dd
+  tmp <- prob_dd
+  
+  # Combine and sum non-overlapping segments
+  tmp <- tmp[1:2187] + tmp[2188:4374] + tmp[4375:6561]
+  tmp <- tmp[1:729] + tmp[730:1458] + tmp[1459:2187]
+  tmp <- tmp[1:243] + tmp[244:486] + tmp[487:729]
+  tmp <- tmp[1:81] + tmp[82:162] + tmp[163:243]
+  tmp <- tmp[1:27] + tmp[28:54] + tmp[55:81]
+  tmp <- tmp[1:9] + tmp[10:18] + tmp[19:27]
+  tmp <- tmp[1:3] + tmp[4:6] + tmp[7:9]
+  
+  prtl[j_iter, ] <- t(tmp)
+  # Compute the joint density of y_t given past information
+  pr_vl <- (1 / sqrt(2 * pi * var_L)) * exp(-0.5 * f_cast1 * f_cast1 / var_L) * prob_dd
+  # Compute density of y_t given past information, weighted average of 3^8 conditional densities
+  pr_val <- rowSums(pr_vl)
+  # Compute log-likelihood
+  lik <- log(pr_val)
+  # Compute conditional probabilities of hidden states
+  pro_ <- pr_vl / pr_val
+  # Compute expected value of y_t
+  yhatvec <- sapply(1:T, function(j_iter) sum(yhat * pro_[, j_iter]))
+  # Compute the "gap" variable
+  gapvec <- sapply(1:T, function(j_iter) -(sLmat[, (9 - mstarL):8] %*% Lvec + sUmat[, (9 - mstarU):8] %*% Uvec) %*% pro_[, j_iter])
+  
+  #Reducing probability of transition 
+  # Make a copy of prob_dd
+  tmp <- pro_
+  
+  # Combine and sum non-overlapping segments
+  tmp <- tmp[1:2187] + tmp[2188:4374] + tmp[4375:6561]
+  tmp <- tmp[1:729] + tmp[730:1458] + tmp[1459:2187]
+  tmp <- tmp[1:243] + tmp[244:486] + tmp[487:729]
+  tmp <- tmp[1:81] + tmp[82:162] + tmp[163:243]
+  tmp <- tmp[1:27] + tmp[28:54] + tmp[55:81]
+  tmp <- tmp[1:9] + tmp[10:18] + tmp[19:27]
+  tmp <- tmp[1:3] + tmp[4:6] + tmp[7:9]
+  
+  prtt[j_iter] <- t(tmp)
+  
+  # Calculating prob__t by summing pro_ 
+  prob__t <- pro_[1:(dmnsion / 3)] + pro_[(dmnsion / 3 + 1):(2 * dmnsion / 3)] + pro_[(2 * dmnsion / 3 + 1):dmnsion]
+  prob__ <- rep(prob__t, 3^7)
+  
+  j_iter <- j_iter + 1
+  }
+  
+  pr_tt1 <- prtt[, 1]
+  pr_tt2 <- prtt[, 2]
+  pr_tt3 <- prtt[, 3]
+  
+  pr_tl1 <- prtl[, 1]
+  pr_tl2 <- prtl[, 2]
+  pr_tl3 <- prtl[, 3]
+}
+
+#END FILTERED INFERENCE FUNCTION
+
+
+#SMOOTHED PROBABILITIES
+
+smoothed_probs <- function(prmtr_in, T, pr_tt1, pr_tt2, pr_tt3, pr_tl1, pr_tl2, pr_tl3) {
+  p01 <- prmtr_in[1] 
+  p02 <- prmtr_in[2] 
+  p11 <- prmtr_in[3] 
+  p22 <- prmtr_in[4]
+  
+  PI <- matrix(0, nrow =3, ncol =3) 
+  PI[1, 1] <- 1 - p01 - p02 
+  PI[1, 2] <- p01 
+  PI[1, 3] <- p02 
+  PI[2, 1] <- p11 
+  PI[2, 2] <- 1 - p11 
+  PI[2, 3] <- 0 
+  PI[3, 1] <- 1 - p22 
+  PI[3, 2] <- 0 
+  PI[3, 3] <- p22 
+  
+  pr_sm1 <- pr_tt1 
+  pr_sm2 <- pr_tt2
+  pr_sm3 <- pr_tt3
+  
+  j_iter <- T - 1
+  
+  pr_sm11 <- pr_sm1[j_iter + 1, 1] * PI[1, 1] * pr_tt1[j_iter, 1] / pr_tl1[j_iter + 1, 1]
+  pr_sm12 <- pr_sm2[j_iter + 1, 1] * PI[2, 1] * pr_tt1[j_iter, 1] / pr_tl2[j_iter + 1, 1]
+  pr_sm13 <- pr_sm3[j_iter + 1, 1] * PI[3, 1] * pr_tt1[j_iter, 1] / pr_tl3[j_iter + 1, 1]
+  
+  pr_sm21 <- pr_sm1[j_iter + 1, 1] * PI[1, 2] * pr_tt2[j_iter, 1] / pr_tl1[j_iter + 1, 1]
+  pr_sm22 <- pr_sm2[j_iter + 1, 1] * PI[2, 2] * pr_tt2[j_iter, 1] / pr_tl2[j_iter + 1, 1]
+  pr_sm23 <- pr_sm3[j_iter + 1, 1] * PI[3, 2] * pr_tt2[j_iter, 1] / pr_tl3[j_iter + 1, 1]
+  
+  pr_sm31 <- pr_sm1[j_iter + 1, 1] * PI[1, 3] * pr_tt3[j_iter, 1] / pr_tl1[j_iter + 1, 1]
+  pr_sm32 <- pr_sm2[j_iter + 1, 1] * PI[2, 3] * pr_tt3[j_iter, 1] / pr_tl2[j_iter + 1, 1]
+  pr_sm33 <- pr_sm3[j_iter + 1, 1] * PI[3, 3] * pr_tt3[j_iter, 1] / pr_tl3[j_iter + 1, 1]
+  
+  pr_sm1[j_iter, 1] <- pr_sm11 + pr_sm12 + pr_sm13
+  pr_sm2[j_iter, 1] <- pr_sm21 + pr_sm22 + pr_sm23
+  pr_sm3[j_iter, 1] <- pr_sm31 + pr_sm32 + pr_sm33
+  
+  j_iter <- j_iter - 1
+}
+
+#END OF SMOOTHED PROBABILITIES
+
+
+
+
+
+
+
+# MLE Parameter Initialization
+prmtr_in <- c(-3.5, -3.9, 0.6, 0.9, 0.9, -1.3, -2.0, -0.4, -0.2, -1.7)
+
+cat("Optimization in progress...\n")
+
+# File Output
+output <- file("msm_ul.txt", "w")
+
+cat("log likelihood value is ", nval, "\n", file = output)
+cat("Parameter, QMLE parameter Estimates, Standard errors\n", file = output)
+cat("p_01        ", p01, "\n", file = output)
+cat("p_02        ", p02, "\n", file = output)
+cat("p_11        ", p11, "\n", file = output)
+cat("p_22        ", p22, "\n", file = output)
+cat("mu0         ", mu0, "\n", file = output)
+cat("mu1        ", mu1, "\n", file = output)
+cat("mu2        ", mu2, "\n", file = output)
+cat("mu00       ", delta, "\n", file = output)
+cat("sig_e1      ", sigma2_pre, "\n", file = output)
+cat("sig_e2      ", sigma2_post, "\n", file = output)
+
+close(output)
+
+# Parameter Initialization
+prm_fnl <- prmtr_in
+
+# Call the equivalent of filtered_inference in R
+result <- prm_fnl(prmtr_in, T, y, mstarU, mstarL, vol_bdate, growth_bdate)
+
+# Unpack the result into separate variables
+pr_tt1 <- result$pr_tt1
+pr_tt2 <- result$pr_tt2
+pr_tt3 <- result$pr_tt3
+pr_tl1 <- result$pr_tl1
+pr_tl2 <- result$pr_tl2
+pr_tl3 <- result$pr_tl3
+yhatvec <- result$yhatvec
+gapvec <- result$gapvec
+
+RDSS <- yy[2:T+1] - gapvec/100
+
+smoothed_probs_result <- smoothed_probs(prmtr_in, T, pr_tt1, pr_tt2, pr_tt3, pr_tl1, pr_tl2, pr_tl3)
+pr_sm1 <- smoothed_probs_result$pr_sm1
+pr_sm2 <- smoothed_probs_result$pr_sm2
+pr_sm3 <- smoothed_probs_result$pr_sm3
+
+# Combining Probabilities
+pr_smC <- pr_sm2 + pr_sm3
+
+
+
